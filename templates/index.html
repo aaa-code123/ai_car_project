@@ -1,1 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 智慧遙控車控制面板</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; text-align: center; background: #1a1a2e; color: #eee; margin: 0; padding: 16px; }
+        h1 { font-size: 1.4em; margin: 0 0 12px; color: #e0e0ff; letter-spacing: 1px; }
+        h3 { margin: 16px 0 8px; color: #aac4ff; font-size: 1em; }
 
+        /* 影像 */
+        .video-container { margin-bottom: 12px; border: 3px solid #444; display: inline-block; background: #000; border-radius: 8px; overflow: hidden; }
+        .video-container img { max-width: 100%; height: auto; display: block; }
+
+        /* 資訊列 */
+        .info-bar { display: flex; justify-content: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+        .info-box { padding: 6px 14px; border-radius: 8px; background: #16213e; font-weight: bold; font-size: 0.88em; border: 1px solid #334; min-width: 140px; }
+        #status-box { color: #ff7f7f; }
+        #speed-box  { color: #7fc8ff; }
+        #servo-box  { color: #aaa; }
+        #auto-box   { color: #aaa; }
+        #cpu-box    { color: #ffd080; }
+
+        /* CPU 條 */
+        .cpu-bar-wrap { width: 80px; height: 6px; background: #334; border-radius: 3px; display: inline-block; vertical-align: middle; margin-left: 6px; }
+        .cpu-bar { height: 6px; border-radius: 3px; background: #ffd080; transition: width 0.4s; }
+
+        /* 自動循線按鈕 */
+        .auto-btn { width: 220px; height: 56px; font-size: 1.1em; font-weight: bold; cursor: pointer; border-radius: 12px; border: none; background: #28a745; color: white; touch-action: manipulation; box-shadow: 0 3px 8px rgba(0,0,0,0.4); transition: background 0.2s; }
+        .auto-btn.on { background: #dc3545; }
+
+        /* 設定面板 */
+        .panel { background: #16213e; border: 1px solid #334; border-radius: 12px; padding: 14px 18px; margin: 10px auto; max-width: 520px; text-align: left; }
+        .panel-title { font-size: 0.95em; color: #aac4ff; font-weight: bold; margin-bottom: 10px; }
+        .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+        .row label { width: 130px; font-size: 0.85em; color: #ccc; flex-shrink: 0; }
+        .row input[type=range] { flex: 1; accent-color: #5b9aff; }
+        .row .val { width: 48px; text-align: right; font-size: 0.85em; color: #fff; font-weight: bold; }
+        .toggle-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+        .toggle-row label { font-size: 0.85em; color: #ccc; }
+
+        /* Toggle switch */
+        .switch { position: relative; display: inline-block; width: 42px; height: 22px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #444; border-radius: 22px; transition: .3s; }
+        .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: .3s; }
+        input:checked + .slider { background: #28a745; }
+        input:checked + .slider:before { transform: translateX(20px); }
+
+        /* 行駛按鈕 */
+        .controller { display: grid; grid-template-columns: repeat(3, 76px); grid-gap: 8px; justify-content: center; }
+        .btn { width: 76px; height: 76px; font-size: 0.95em; font-weight: bold; cursor: pointer; border-radius: 10px; border: none; background: #0d6efd; color: white; touch-action: manipulation; transition: background 0.15s; }
+        .btn:active, .btn.active { background: #0a4fcf; }
+
+        /* 鏡頭按鈕 */
+        .cam-controller { display: grid; grid-template-columns: repeat(3, 66px); grid-gap: 7px; justify-content: center; }
+        .cam-btn { width: 66px; height: 66px; font-size: 0.88em; font-weight: bold; cursor: pointer; border-radius: 10px; border: none; background: #198754; color: white; touch-action: manipulation; }
+        .cam-btn:active { background: #146c43; }
+        .cam-btn.center { background: #6c757d; }
+        .empty { visibility: hidden; }
+        .hint { color: #666; font-size: 0.78em; margin-top: 5px; }
+    </style>
+</head>
+<body>
+    <h1>🚗 AI 智慧遙控車</h1>
+
+    <div class="video-container">
+        <img src="{{ url_for('video_feed') }}" alt="即時影像串流">
+    </div>
+
+    <!-- 狀態列 -->
+    <div class="info-bar">
+        <div class="info-box" id="status-box">STATUS：--</div>
+        <div class="info-box" id="speed-box">SPEED：0 %</div>
+        <div class="info-box" id="servo-box">PAN：90° | TILT：90°</div>
+        <div class="info-box" id="auto-box">模式：手動</div>
+        <div class="info-box" id="cpu-box">
+            CPU：<span id="cpu-val">--</span>%
+            <span class="cpu-bar-wrap"><span class="cpu-bar" id="cpu-bar" style="width:0%"></span></span>
+            &nbsp;MEM：<span id="mem-val">--</span>%
+        </div>
+    </div>
+
+    <!-- 自動循線 -->
+    <h3>🤖 自動循線</h3>
+    <button class="auto-btn" id="btn-auto" onclick="toggleAuto()">▶ 啟動自動循線</button>
+    <p class="hint" id="auto-hint">綠=左線　橘=右線　黃=車道中心　白=車身中心</p>
+
+    <!-- 自動循線設定面板 -->
+    <div class="panel">
+        <div class="panel-title">⚙️ 自動循線參數</div>
+
+        <div class="toggle-row">
+            <label class="switch">
+                <input type="checkbox" id="tog-debug" checked onchange="saveSetting('show_debug', this.checked)">
+                <span class="slider"></span>
+            </label>
+            <label for="tog-debug">顯示偵測線（綠/橘/黃）</label>
+        </div>
+
+        <div class="row">
+            <label>速度 (base_speed)</label>
+            <input type="range" id="sl-speed" min="20" max="80" value="35"
+                oninput="document.getElementById('v-speed').textContent=this.value"
+                onchange="saveSetting('speed', parseInt(this.value))">
+            <span class="val" id="v-speed">35</span>
+        </div>
+
+        <div class="row">
+            <label>推論幀率 (FPS)</label>
+            <input type="range" id="sl-fps" min="1" max="30" value="20"
+                oninput="document.getElementById('v-fps').textContent=this.value"
+                onchange="saveSetting('fps', parseInt(this.value))">
+            <span class="val" id="v-fps">20</span>
+        </div>
+
+        <div class="row">
+            <label>矯正力度 (Kp)</label>
+            <input type="range" id="sl-kp" min="1" max="20" value="2"
+                oninput="document.getElementById('v-kp').textContent=(this.value/10).toFixed(1)"
+                onchange="saveSetting('kp', this.value/10)">
+            <span class="val" id="v-kp">0.2</span>
+        </div>
+
+        <div class="row">
+            <label>矯正頻率 (每N幀)</label>
+            <input type="range" id="sl-skip" min="1" max="10" value="1"
+                oninput="document.getElementById('v-skip').textContent=this.value"
+                onchange="saveSetting('correct_skip', parseInt(this.value))">
+            <span class="val" id="v-skip">1</span>
+        </div>
+    </div>
+
+    <!-- 行駛控制 -->
+    <h3>🚗 行駛控制（WASD）</h3>
+    <div class="controller">
+        <div class="empty"></div>
+        <button class="btn" id="btn-forward"
+            onmousedown="sendCmd('forward')" onmouseup="sendCmd('stop')"
+            ontouchstart="sendCmd('forward')" ontouchend="sendCmd('stop')">前進<br><small>W</small></button>
+        <div class="empty"></div>
+        <button class="btn" id="btn-left"
+            onmousedown="sendCmd('left')" onmouseup="sendCmd('stop')"
+            ontouchstart="sendCmd('left')" ontouchend="sendCmd('stop')">左轉<br><small>A</small></button>
+        <button class="btn" id="btn-backward"
+            onmousedown="sendCmd('backward')" onmouseup="sendCmd('stop')"
+            ontouchstart="sendCmd('backward')" ontouchend="sendCmd('stop')">後退<br><small>S</small></button>
+        <button class="btn" id="btn-right"
+            onmousedown="sendCmd('right')" onmouseup="sendCmd('stop')"
+            ontouchstart="sendCmd('right')" ontouchend="sendCmd('stop')">右轉<br><small>D</small></button>
+    </div>
+
+    <!-- 鏡頭控制 -->
+    <h3>🎥 鏡頭控制（方向鍵）</h3>
+    <div class="cam-controller">
+        <div class="empty"></div>
+        <button class="cam-btn"
+            onmousedown="startCam('cam_up')" onmouseup="stopCam()"
+            ontouchstart="startCam('cam_up')" ontouchend="stopCam()">上<br><small>↑</small></button>
+        <div class="empty"></div>
+        <button class="cam-btn"
+            onmousedown="startCam('cam_left')" onmouseup="stopCam()"
+            ontouchstart="startCam('cam_left')" ontouchend="stopCam()">左<br><small>←</small></button>
+        <button class="cam-btn center" onclick="sendCam('cam_center')">置中<br><small>Space</small></button>
+        <button class="cam-btn"
+            onmousedown="startCam('cam_right')" onmouseup="stopCam()"
+            ontouchstart="startCam('cam_right')" ontouchend="stopCam()">右<br><small>→</small></button>
+        <div class="empty"></div>
+        <button class="cam-btn"
+            onmousedown="startCam('cam_down')" onmouseup="stopCam()"
+            ontouchstart="startCam('cam_down')" ontouchend="stopCam()">下<br><small>↓</small></button>
+        <div class="empty"></div>
+    </div>
+    <p class="hint">⌨️ WASD 行駛　方向鍵 鏡頭　Space 置中　手動操作自動停止循線</p>
+
+    <script>
+        // ---- 自動循線 ----
+        let autoOn = false;
+
+        function toggleAuto() {
+            const next = !autoOn;
+            fetch('/auto', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'action=' + (next ? 'start' : 'stop')
+            })
+            .then(r => r.json())
+            .then(d => { autoOn = d.auto; updateAutoUI(); })
+            .catch(console.error);
+        }
+
+        function updateAutoUI() {
+            const btn  = document.getElementById('btn-auto');
+            const box  = document.getElementById('auto-box');
+            const hint = document.getElementById('auto-hint');
+            if (autoOn) {
+                btn.textContent = '■ 停止自動循線';
+                btn.classList.add('on');
+                box.textContent = '模式：自動循線';
+                box.style.color = '#5dde8a';
+                hint.textContent = '自動循線中 — 綠=左線 橘=右線 黃=車道中心 白=車身中心';
+            } else {
+                btn.textContent = '▶ 啟動自動循線';
+                btn.classList.remove('on');
+                box.textContent = '模式：手動';
+                box.style.color = '#aaa';
+                hint.textContent = '綠=左線　橘=右線　黃=車道中心　白=車身中心';
+            }
+        }
+
+        // ---- 設定參數 ----
+        function saveSetting(key, value) {
+            const payload = {};
+            payload[key] = value;
+            fetch('/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            }).catch(console.error);
+        }
+
+        // ---- 行駛 ----
+        const keyMap = { 'w':'forward','s':'backward','a':'left','d':'right' };
+        const btnMap = { 'forward':'btn-forward','backward':'btn-backward','left':'btn-left','right':'btn-right' };
+        const pressedKeys = new Set();
+
+        function sendCmd(action) {
+            if (action !== 'stop' && autoOn) {
+                autoOn = false;
+                updateAutoUI();
+            }
+            fetch('/control', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'action=' + action
+            }).catch(console.error);
+        }
+
+        function setActive(id, active) {
+            const el = document.getElementById(id);
+            if (el) active ? el.classList.add('active') : el.classList.remove('active');
+        }
+
+        // ---- 鏡頭 ----
+        let camTimer = null, camBusy = false;
+
+        function sendCam(dir) {
+            if (camBusy) return;
+            camBusy = true;
+            fetch('/camera', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'direction=' + dir
+            })
+            .then(r => r.json())
+            .then(d => { document.getElementById('servo-box').textContent = 'PAN：' + d.pan + '° | TILT：' + d.tilt + '°'; })
+            .catch(console.error)
+            .finally(() => { camBusy = false; });
+        }
+
+        function startCam(dir) {
+            if (camTimer) return;
+            sendCam(dir);
+            camTimer = setInterval(() => sendCam(dir), 400);
+        }
+
+        function stopCam() {
+            clearInterval(camTimer); camTimer = null;
+            sendCam('cam_release');
+        }
+
+        // ---- 鍵盤 ----
+        document.addEventListener('keydown', e => {
+            const key = e.key.toLowerCase();
+            if (keyMap[key] && !pressedKeys.has(key)) {
+                pressedKeys.add(key); sendCmd(keyMap[key]); setActive(btnMap[keyMap[key]], true);
+            }
+            const camKey = {'arrowup':'cam_up','arrowdown':'cam_down','arrowleft':'cam_left','arrowright':'cam_right'};
+            if (camKey[key] && !pressedKeys.has(key)) {
+                e.preventDefault(); pressedKeys.add(key); startCam(camKey[key]);
+            }
+            if (e.key === ' ') { e.preventDefault(); sendCam('cam_center'); }
+        });
+
+        document.addEventListener('keyup', e => {
+            const key = e.key.toLowerCase();
+            if (keyMap[key]) { pressedKeys.delete(key); sendCmd('stop'); setActive(btnMap[keyMap[key]], false); }
+            const camKey = {'arrowup':'cam_up','arrowdown':'cam_down','arrowleft':'cam_left','arrowright':'cam_right'};
+            if (camKey[key]) { pressedKeys.delete(key); stopCam(); }
+        });
+
+        // ---- 狀態輪詢（含 CPU / 設定同步）----
+        let firstLoad = true;
+        setInterval(() => {
+            fetch('/status')
+            .then(r => r.json())
+            .then(d => {
+                document.getElementById('status-box').textContent = 'STATUS：' + d.status;
+                document.getElementById('speed-box').textContent  = 'SPEED：' + d.speed + ' %';
+
+                // CPU / MEM
+                const cpu = d.cpu ?? 0;
+                const mem = d.mem ?? 0;
+                document.getElementById('cpu-val').textContent = cpu.toFixed(0);
+                document.getElementById('mem-val').textContent = mem.toFixed(0);
+                const bar = document.getElementById('cpu-bar');
+                bar.style.width = cpu + '%';
+                bar.style.background = cpu > 80 ? '#ff5555' : cpu > 60 ? '#ffaa33' : '#ffd080';
+
+                // auto 狀態同步
+                if (d.auto !== autoOn) { autoOn = d.auto; updateAutoUI(); }
+
+                // 第一次載入時把後端設定值同步到 slider
+                if (firstLoad && d.settings) {
+                    firstLoad = false;
+                    const s = d.settings;
+                    const sl = (id, v) => {
+                        const el = document.getElementById(id);
+                        if (el) el.value = v;
+                    };
+                    sl('sl-speed', s.speed);
+                    document.getElementById('v-speed').textContent = s.speed;
+                    sl('sl-fps', s.fps);
+                    document.getElementById('v-fps').textContent = s.fps;
+                    sl('sl-kp', Math.round(s.kp * 10));
+                    document.getElementById('v-kp').textContent = s.kp.toFixed(1);
+                    sl('sl-skip', s.correct_skip);
+                    document.getElementById('v-skip').textContent = s.correct_skip;
+                    document.getElementById('tog-debug').checked = s.show_debug;
+                }
+            })
+            .catch(console.error);
+        }, 500);
+
+        window.oncontextmenu = e => { e.preventDefault(); return false; };
+    </script>
+</body>
+</html>
