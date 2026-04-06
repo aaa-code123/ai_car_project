@@ -1,11 +1,28 @@
 import cv2
+import json
+import os
 import time
 import logging
 import threading
 import psutil
 from flask import Flask, render_template, Response, request, jsonify
-from ultralytics import YOLO
 from picamera2 import Picamera2
+
+SETTINGS_PATH = os.path.join(os.path.dirname(__file__), 'settings.json')
+
+def _load_settings():
+    try:
+        with open(SETTINGS_PATH, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_settings(data):
+    try:
+        with open(SETTINGS_PATH, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[警告] 設定儲存失敗: {e}")
 
 # ---- 馬達控制 ----
 try:
@@ -19,13 +36,17 @@ except Exception as e:
 
 # ---- 車道偵測 + PID ----
 try:
-    from lane_detection import detect_lane
+    from lane_detection import detect_lane, get_roi_ratio, set_roi_ratio, get_lane_params, set_lane_params
     from pid_controller import PIDController, pid_to_speeds
     LANE_AVAILABLE = True
     print("✅ 車道偵測模組載入成功")
 except Exception as e:
     print(f"[警告] 車道偵測模組載入失敗: {e}")
     LANE_AVAILABLE = False
+    def get_roi_ratio(): return []
+    def set_roi_ratio(pts): pass
+    def get_lane_params(): return {}
+    def set_lane_params(p): pass
 
 # ---- PiCamera2 初始化 ----
 picam2 = Picamera2()
@@ -34,9 +55,6 @@ picam2.configure(picam2.create_video_configuration(
 ))
 picam2.start()
 print("📷 相機啟動成功")
-
-# ---- YOLO 模型 ----
-model = YOLO('yolo_model.pt')
 
 # ---- 全域狀態 ----
 current_status  = "等待辨識..."
@@ -47,11 +65,30 @@ SERVO_STEP      = 5
 auto_mode       = False
 
 # ---- 可調參數（前端可動態修改）----
-auto_base_speed   = 35       # 自動模式速度 0~100
+auto_base_speed   = 25       # 自動模式速度 0~100
 auto_fps          = 20       # 自動模式推論幀率（每秒幾次）
 auto_kp           = 0.2      # PID Kp（方向矯正力度）
 auto_correct_skip = 1        # 每幾幀執行一次馬達修正（1=每幀都修正）
 show_lane_debug   = True     # 是否在串流上顯示偵測線
+
+# ---- 從 settings.json 還原上次設定 ----
+_s = _load_settings()
+if _s:
+    auto_base_speed   = _s.get('speed',         auto_base_speed)
+    auto_fps          = _s.get('fps',            auto_fps)
+    auto_kp           = _s.get('kp',             auto_kp)
+    auto_correct_skip = _s.get('correct_skip',   auto_correct_skip)
+    show_lane_debug   = _s.get('show_debug',     show_lane_debug)
+    _lane = {k: _s[k] for k in ('white_s_min','white_s_max','white_v_min','white_v_max',
+                                  'hough_threshold','hough_min_len','hough_max_gap','seg_min_len',
+                                  'lane_half_width','single_target_ratio','horizontal_slope',
+                                  'single_e_clamp') if k in _s}
+    if _lane and LANE_AVAILABLE:
+        set_lane_params(_lane)
+    _roi = _s.get('roi')
+    if _roi and LANE_AVAILABLE:
+        set_roi_ratio(_roi)
+    print(f"[設定] 已從 settings.json 還原")
 
 pid = PIDController(kp=auto_kp, ki=0.0, kd=0.0) if LANE_AVAILABLE else None
 
@@ -107,37 +144,56 @@ except Exception as e:
     print(f"[警告] Servo 初始化失敗: {e}")
 
 
-# ---- 背景執行緒：擷取影像 + YOLO 推論 ----
+# ---- 在畫面上疊加即時參數 ----
+def overlay_params(img, e, l=None, r=None):
+    h, w = img.shape[:2]
+    mode_str = "AUTO" if auto_mode else "MANUAL"
+    mode_color = (0, 255, 120) if auto_mode else (80, 180, 255)
+
+    lines = [
+        (f"MODE : {mode_str}",          mode_color),
+        (f"e    : {e:+d} px" if e is not None else "e    : -- px", (0, 255, 255)),
+        (f"Kp   : {auto_kp:.2f}",       (200, 200, 255)),
+        (f"SPD  : {auto_base_speed}%",  (100, 220, 255)),
+        (f"FPS  : {auto_fps}",          (180, 180, 180)),
+    ]
+    if l is not None and r is not None:
+        lines.append((f"L={l}  R={r}", (160, 255, 160)))
+
+    x, y0 = w - 170, 20
+    for i, (text, color) in enumerate(lines):
+        y = y0 + i * 24
+        cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color,      1, cv2.LINE_AA)
+    return img
+
+
+# ---- 背景執行緒：擷取影像（隨時顯示車道偵測線）----
 def inference_thread():
     global current_status, annotated_frame
-    skip = 0
     while True:
         frame = picam2.capture_array()
-        frame = cv2.flip(frame, 0)
+        frame = cv2.flip(frame, -1)
 
-        # 自動循線模式下不跑 YOLO，節省 CPU
+        # 自動循線模式由 lane_follow_thread 負責更新 annotated_frame，這裡只擷取原始幀
         if auto_mode:
             with frame_lock:
                 annotated_frame = frame
             time.sleep(0.033)
             continue
 
-        skip += 1
-        if skip % 2 == 0:
-            results = model.predict(frame, imgsz=320, conf=0.5, verbose=False)
-            ann = results[0].plot()
-            boxes = results[0].boxes
-            names = results[0].names
-            if boxes is not None and len(boxes) > 0:
-                labels = [names[int(cls)] for cls in boxes.cls]
-                current_status = "偵測到：" + "、".join(set(labels))
-            else:
-                current_status = "未偵測到目標"
+        # 非自動循線模式：也顯示車道偵測線
+        if LANE_AVAILABLE and show_lane_debug:
+            e, debug_img = detect_lane(frame)
+            current_status = f"偵測中 e={e}px"
+            overlay_params(debug_img, e)
+            with frame_lock:
+                annotated_frame = debug_img
         else:
-            ann = frame
+            with frame_lock:
+                annotated_frame = frame
 
-        with frame_lock:
-            annotated_frame = ann
+        time.sleep(0.05)
 
 threading.Thread(target=inference_thread, daemon=True).start()
 
@@ -163,8 +219,22 @@ def lane_follow_thread():
 
         e, debug_img = detect_lane(frame)
 
+        # 偵測失敗（無線）→ 停車
+        if e is None:
+            if MOTOR_AVAILABLE:
+                with i2c_lock:
+                    motor.stop()
+            current_status = "no lane - stopped"
+            if show_lane_debug:
+                overlay_params(debug_img, 0)
+                with frame_lock:
+                    annotated_frame = debug_img
+            time.sleep(loop_interval)
+            continue
+
         # 根據開關決定是否把偵測畫面疊回串流
         if show_lane_debug:
+            overlay_params(debug_img, e)
             with frame_lock:
                 annotated_frame = debug_img
 
@@ -197,6 +267,11 @@ def lane_follow_thread():
                 motor.motorD2.on()
 
                 current_speed = (l + r) // 2
+
+            # 更新疊加（加入馬達速度）
+            with frame_lock:
+                if annotated_frame is not None:
+                    overlay_params(annotated_frame, e, l, r)
 
             current_status = f"e={e}px Kp={auto_kp} L={l} R={r}"
             print(f"[LANE] e={e:4d} kp={auto_kp} out={out:6.1f} L={l:3d} R={r:3d}")
@@ -254,6 +329,19 @@ def auto():
     return jsonify({'auto': auto_mode, 'lane_available': LANE_AVAILABLE})
 
 
+def _collect_settings():
+    """收集所有可調參數，用於持久化儲存"""
+    return {
+        'speed':        auto_base_speed,
+        'fps':          auto_fps,
+        'kp':           auto_kp,
+        'correct_skip': auto_correct_skip,
+        'show_debug':   show_lane_debug,
+        'roi':          get_roi_ratio(),
+        **get_lane_params(),
+    }
+
+
 @app.route('/settings', methods=['POST'])
 def settings():
     """前端動態調整自動循線參數"""
@@ -272,6 +360,13 @@ def settings():
     if 'show_debug' in data:
         show_lane_debug = bool(data['show_debug'])
 
+    # 車道偵測參數
+    lane_keys = {'white_s_min', 'white_s_max', 'white_v_min', 'white_v_max', 'hough_threshold', 'hough_min_len', 'hough_max_gap', 'seg_min_len', 'lane_half_width', 'single_target_ratio', 'horizontal_slope', 'single_e_clamp', 'overlay_alpha'}
+    lane_data = {k: data[k] for k in lane_keys if k in data}
+    if lane_data:
+        set_lane_params(lane_data)
+
+    _save_settings(_collect_settings())
     print(f"[SETTINGS] speed={auto_base_speed} fps={auto_fps} kp={auto_kp} skip={auto_correct_skip} debug={show_lane_debug}")
     return jsonify({
         'speed':        auto_base_speed,
@@ -279,6 +374,7 @@ def settings():
         'kp':           auto_kp,
         'correct_skip': auto_correct_skip,
         'show_debug':   show_lane_debug,
+        **get_lane_params(),
     })
 
 
@@ -305,6 +401,20 @@ def camera():
     return jsonify({"pan": pan_angle, "tilt": tilt_angle})
 
 
+@app.route('/roi', methods=['GET', 'POST'])
+def roi():
+    if request.method == 'GET':
+        return jsonify({'roi': get_roi_ratio()})
+    data = request.get_json(force=True)
+    if 'roi' in data:
+        pts = data['roi']
+        if len(pts) == 6:
+            set_roi_ratio(pts)
+            _save_settings(_collect_settings())
+            print(f"[ROI] 已更新 6 頂點: {pts}")
+    return jsonify({'roi': get_roi_ratio()})
+
+
 @app.route('/status')
 def status():
     cpu = psutil.cpu_percent(interval=None)
@@ -323,6 +433,7 @@ def status():
             'kp':           auto_kp,
             'correct_skip': auto_correct_skip,
             'show_debug':   show_lane_debug,
+            **get_lane_params(),
         }
     })
 
