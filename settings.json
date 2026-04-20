@@ -1,0 +1,49 @@
+{
+  "speed": 25,
+  "fps": 20,
+  "kp": 0.1,
+  "correct_skip": 1,
+  "show_debug": true,
+  "roi": [
+    [
+      0.0,
+      0.9898899434899808
+    ],
+    [
+      0.0,
+      0.4205391591698873
+    ],
+    [
+      0.26188893011764913,
+      0.2263213682569582
+    ],
+    [
+      0.7321333204455558,
+      0.23297266246630507
+    ],
+    [
+      0.9991364912249604,
+      0.4338417475885811
+    ],
+    [
+      0.9981402107369776,
+      0.9885596846481115
+    ]
+  ],
+  "white_s_min": 70,
+  "white_s_max": 80,
+  "white_v_min": 194,
+  "white_v_max": 237,
+  "hough_threshold": 17,
+  "hough_min_len": 35,
+  "hough_max_gap": 149,
+  "seg_min_len": 142,
+  "lane_half_width": 155,
+  "lane_half_width_max": 220,
+  "single_target_ratio": 0.53,
+  "horizontal_slope": 0.22,
+  "single_e_clamp": 100,
+  "noise_ratio": 2.0,
+  "overlay_alpha": 0.4,
+  "lane_merge_ratio": 0.5
+}

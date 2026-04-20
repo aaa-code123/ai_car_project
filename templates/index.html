@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 智慧遙控車控制面板</title>
+    <style>
+        * { box-sizing: border-box; }
+        html, body { height: 100%; margin: 0; }
+        body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 10px; display: flex; flex-direction: column; min-height: 100vh; }
+        h1 { font-size: 1.3em; margin: 0 0 10px; color: #e0e0ff; letter-spacing: 1px; text-align: center; flex-shrink: 0; }
+
+        /* 主要左右版型 - 佔滿視窗 */
+        .main-layout {
+            display: flex;
+            gap: 12px;
+            flex: 1;
+            min-height: 0;
+        }
+
+        /* 左欄：影像 + 狀態 + 自動循線 — 佔左半邊 */
+        .left-col {
+            flex: 1 1 50%;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            min-width: 0;
+        }
+
+        /* 右欄：參數設定 — 佔右半邊 */
+        .right-col {
+            flex: 1 1 50%;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            min-width: 0;
+            overflow-y: auto;
+        }
+
+        /* 影像：自適應填滿左欄寬度 */
+        .video-container {
+            border: 3px solid #444;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+            width: 100%;
+            /* 維持 4:3 比例 */
+            aspect-ratio: 4 / 3;
+        }
+        .video-container img {
+            display: block;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        #roi-canvas {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            cursor: crosshair;
+            pointer-events: none;
+        }
+        #roi-canvas.editing { pointer-events: all; }
+
+        .roi-btn { padding: 5px 12px; border-radius: 6px; border: none; font-size: 0.8em; font-weight: bold; cursor: pointer; }
+        #btn-roi-edit { background: #5b9aff; color: #fff; }
+        #btn-roi-edit.active { background: #ff9a3c; }
+        #btn-roi-reset { background: #444; color: #ccc; }
+
+        /* 狀態列 */
+        .info-bar { display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
+        .info-box {
+            padding: 4px 10px;
+            border-radius: 8px;
+            background: #16213e;
+            font-weight: bold;
+            font-size: 0.82em;
+            border: 1px solid #334;
+        }
+        #status-box { color: #ff7f7f; }
+        #speed-box  { color: #7fc8ff; }
+        #auto-box   { color: #aaa; }
+        #cpu-box    { color: #ffd080; }
+
+        /* CPU 條 */
+        .cpu-bar-wrap { width: 60px; height: 6px; background: #334; border-radius: 3px; display: inline-block; vertical-align: middle; margin-left: 4px; }
+        .cpu-bar { height: 6px; border-radius: 3px; background: #ffd080; transition: width 0.4s; }
+
+        /* 自動循線按鈕 */
+        .auto-btn { width: 100%; height: 48px; font-size: 1em; font-weight: bold; cursor: pointer; border-radius: 10px; border: none; background: #28a745; color: white; touch-action: manipulation; box-shadow: 0 3px 8px rgba(0,0,0,0.4); transition: background 0.2s; flex-shrink: 0; }
+        .auto-btn.on { background: #dc3545; }
+        .hint { color: #666; font-size: 0.75em; margin: 0; flex-shrink: 0; }
+
+        /* 右側設定面板 */
+        .panel { background: #16213e; border: 1px solid #334; border-radius: 12px; padding: 14px 16px; text-align: left; }
+        .panel-title { font-size: 0.95em; color: #aac4ff; font-weight: bold; margin-bottom: 12px; }
+        .row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+        .row label { width: 130px; font-size: 0.85em; color: #ccc; flex-shrink: 0; }
+        .row input[type=range] { flex: 1; accent-color: #5b9aff; }
+        .row .val { width: 44px; text-align: right; font-size: 0.85em; color: #fff; font-weight: bold; }
+        .toggle-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+        .toggle-row label { font-size: 0.85em; color: #ccc; }
+
+        /* Toggle switch */
+        .switch { position: relative; display: inline-block; width: 42px; height: 22px; flex-shrink: 0; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #444; border-radius: 22px; transition: .3s; }
+        .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: .3s; }
+        input:checked + .slider { background: #28a745; }
+        input:checked + .slider:before { transform: translateX(20px); }
+
+        /* Servo 顯示 */
+        .servo-display { font-size: 0.85em; color: #aaa; padding: 8px 12px; background: #16213e; border: 1px solid #334; border-radius: 8px; }
+    </style>
+</head>
+<body>
+    <h1>🚗 AI 智慧遙控車</h1>
+
+    <div class="main-layout">
+
+        <!-- 左欄 -->
+        <div class="left-col">
+
+            <!-- 影像 -->
+            <div class="video-container" id="video-wrap">
+                <img src="{{ url_for('video_feed') }}" alt="即時影像串流" id="video-img">
+                <canvas id="roi-canvas" width="480" height="360"></canvas>
+            </div>
+
+            <!-- ROI 控制按鈕 -->
+            <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
+                <button class="roi-btn" id="btn-roi-edit" onclick="toggleRoiEdit()">✏️ 編輯 ROI</button>
+                <button class="roi-btn" id="btn-roi-reset" onclick="resetRoi()" style="display:none">↺ 重置</button>
+                <span id="roi-hint" style="font-size:0.75em;color:#888"></span>
+            </div>
+
+            <!-- 狀態列 -->
+            <div class="info-bar">
+                <div class="info-box" id="status-box">STATUS：--</div>
+                <div class="info-box" id="speed-box">SPEED：0%</div>
+                <div class="info-box" id="auto-box">模式：手動</div>
+                <div class="info-box" id="cpu-box">
+                    CPU：<span id="cpu-val">--</span>%
+                    <span class="cpu-bar-wrap"><span class="cpu-bar" id="cpu-bar" style="width:0%"></span></span>
+                    &nbsp;MEM：<span id="mem-val">--</span>%
+                </div>
+            </div>
+
+            <!-- 自動循線 -->
+            <button class="auto-btn" id="btn-auto" onclick="toggleAuto()">▶ 啟動自動循線（Space）</button>
+            <p class="hint">綠=左線　橘=右線　黃=車道中心　白=車身中心　WASD 行駛　方向鍵 鏡頭</p>
+
+        </div>
+
+        <!-- 右欄 -->
+        <div class="right-col">
+
+            <!-- 自動循線設定 -->
+            <div class="panel">
+                <div class="panel-title">⚙️ 自動循線參數</div>
+
+                <div class="toggle-row">
+                    <label class="switch">
+                        <input type="checkbox" id="tog-debug" checked onchange="saveSetting('show_debug', this.checked)">
+                        <span class="slider"></span>
+                    </label>
+                    <label for="tog-debug">顯示偵測線（綠/橘/黃）</label>
+                </div>
+
+                <div class="row">
+                    <label>速度 (base_speed)</label>
+                    <input type="range" id="sl-speed" min="20" max="80" value="35"
+                        oninput="document.getElementById('v-speed').textContent=this.value"
+                        onchange="saveSetting('speed', parseInt(this.value))">
+                    <span class="val" id="v-speed">35</span>
+                </div>
+
+                <div class="row">
+                    <label>推論幀率 (FPS)</label>
+                    <input type="range" id="sl-fps" min="1" max="30" value="20"
+                        oninput="document.getElementById('v-fps').textContent=this.value"
+                        onchange="saveSetting('fps', parseInt(this.value))">
+                    <span class="val" id="v-fps">20</span>
+                </div>
+
+                <div class="row">
+                    <label>矯正力度 (Kp)</label>
+                    <input type="range" id="sl-kp" min="1" max="20" value="2"
+                        oninput="document.getElementById('v-kp').textContent=(this.value/10).toFixed(1)"
+                        onchange="saveSetting('kp', this.value/10)">
+                    <span class="val" id="v-kp">0.2</span>
+                </div>
+
+                <div class="row">
+                    <label>矯正頻率 (每N幀)</label>
+                    <input type="range" id="sl-skip" min="1" max="10" value="1"
+                        oninput="document.getElementById('v-skip').textContent=this.value"
+                        onchange="saveSetting('correct_skip', parseInt(this.value))">
+                    <span class="val" id="v-skip">1</span>
+                </div>
+            </div>
+
+            <!-- 車道偵測參數 -->
+            <div class="panel">
+                <div class="panel-title">🎨 車道偵測參數</div>
+
+                <div class="row">
+                    <label>飽和度下限 (S_MIN)</label>
+                    <input type="range" id="sl-smin" min="0" max="255" value="0"
+                        oninput="document.getElementById('v-smin').textContent=this.value"
+                        onchange="saveSetting('white_s_min', parseInt(this.value))">
+                    <span class="val" id="v-smin">0</span>
+                </div>
+
+                <div class="row">
+                    <label>飽和度上限 (S_MAX)</label>
+                    <input type="range" id="sl-smax" min="0" max="255" value="60"
+                        oninput="document.getElementById('v-smax').textContent=this.value"
+                        onchange="saveSetting('white_s_max', parseInt(this.value))">
+                    <span class="val" id="v-smax">60</span>
+                </div>
+
+                <div class="row">
+                    <label>亮度下限 (V_MIN)</label>
+                    <input type="range" id="sl-vmin" min="0" max="255" value="140"
+                        oninput="document.getElementById('v-vmin').textContent=this.value"
+                        onchange="saveSetting('white_v_min', parseInt(this.value))">
+                    <span class="val" id="v-vmin">140</span>
+                </div>
+
+                <div class="row">
+                    <label>亮度上限 (V_MAX)</label>
+                    <input type="range" id="sl-vmax" min="0" max="255" value="255"
+                        oninput="document.getElementById('v-vmax').textContent=this.value"
+                        onchange="saveSetting('white_v_max', parseInt(this.value))">
+                    <span class="val" id="v-vmax">255</span>
+                </div>
+
+                <div class="row">
+                    <label>Hough 門檻</label>
+                    <input type="range" id="sl-hthr" min="1" max="100" value="15"
+                        oninput="document.getElementById('v-hthr').textContent=this.value"
+                        onchange="saveSetting('hough_threshold', parseInt(this.value))">
+                    <span class="val" id="v-hthr">15</span>
+                </div>
+
+                <div class="row">
+                    <label>Hough 最短線段</label>
+                    <input type="range" id="sl-hmin" min="5" max="200" value="20"
+                        oninput="document.getElementById('v-hmin').textContent=this.value"
+                        onchange="saveSetting('hough_min_len', parseInt(this.value))">
+                    <span class="val" id="v-hmin">20</span>
+                </div>
+
+                <div class="row">
+                    <label>Hough 最大間隙</label>
+                    <input type="range" id="sl-hgap" min="0" max="300" value="150"
+                        oninput="document.getElementById('v-hgap').textContent=this.value"
+                        onchange="saveSetting('hough_max_gap', parseInt(this.value))">
+                    <span class="val" id="v-hgap">150</span>
+                </div>
+
+                <div class="row">
+                    <label>線段最短長度</label>
+                    <input type="range" id="sl-seglen" min="5" max="200" value="25"
+                        oninput="document.getElementById('v-seglen').textContent=this.value"
+                        onchange="saveSetting('seg_min_len', parseInt(this.value))">
+                    <span class="val" id="v-seglen">25</span>
+                </div>
+
+                <div class="row">
+                    <label>車道半寬 (px)</label>
+                    <input type="range" id="sl-lhw" min="50" max="400" value="160"
+                        oninput="document.getElementById('v-lhw').textContent=this.value"
+                        onchange="saveSetting('lane_half_width', parseInt(this.value))">
+                    <span class="val" id="v-lhw">160</span>
+                </div>
+
+                <div class="row">
+                    <label>單線目標位置</label>
+                    <input type="range" id="sl-str" min="0" max="100" value="50"
+                        oninput="document.getElementById('v-str').textContent=(this.value/100).toFixed(2)"
+                        onchange="saveSetting('single_target_ratio', this.value/100)">
+                    <span class="val" id="v-str">0.50</span>
+                </div>
+
+                <div class="row">
+                    <label>水平線斜率門檻</label>
+                    <input type="range" id="sl-hs" min="0" max="100" value="20"
+                        oninput="document.getElementById('v-hs').textContent=(this.value/100).toFixed(2)"
+                        onchange="saveSetting('horizontal_slope', this.value/100)">
+                    <span class="val" id="v-hs">0.20</span>
+                </div>
+
+                <div class="row">
+                    <label>單線 e 上限 (px)</label>
+                    <input type="range" id="sl-sec" min="50" max="500" value="200"
+                        oninput="document.getElementById('v-sec').textContent=this.value"
+                        onchange="saveSetting('single_e_clamp', parseInt(this.value))">
+                    <span class="val" id="v-sec">200</span>
+                </div>
+
+                <div class="row">
+                    <label>雜訊過濾倍率</label>
+                    <input type="range" id="sl-nr" min="10" max="100" value="20"
+                        oninput="document.getElementById('v-nr').textContent=(this.value/10).toFixed(1)"
+                        onchange="saveSetting('noise_ratio', this.value/10)">
+                    <span class="val" id="v-nr">2.0</span>
+                </div>
+
+                <div class="row">
+                    <label>遮罩重疊倍率</label>
+                    <input type="range" id="sl-oa" min="0" max="100" value="40"
+                        oninput="document.getElementById('v-oa').textContent=(this.value/100).toFixed(2)"
+                        onchange="saveSetting('overlay_alpha', this.value/100)">
+                    <span class="val" id="v-oa">0.40</span>
+                </div>
+            </div>
+
+            <!-- 鏡頭角度顯示 -->
+            <div class="servo-display" id="servo-box">PAN：90° | TILT：90°</div>
+
+        </div>
+    </div>
+
+    <script>
+        // ---- 自動循線 ----
+        let autoOn = false;
+
+        function toggleAuto() {
+            const next = !autoOn;
+            fetch('/auto', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'action=' + (next ? 'start' : 'stop')
+            })
+            .then(r => r.json())
+            .then(d => { autoOn = d.auto; updateAutoUI(); })
+            .catch(console.error);
+        }
+
+        function updateAutoUI() {
+            const btn = document.getElementById('btn-auto');
+            const box = document.getElementById('auto-box');
+            if (autoOn) {
+                btn.textContent = '■ 停止自動循線（Space）';
+                btn.classList.add('on');
+                box.textContent = '模式：自動循線';
+                box.style.color = '#5dde8a';
+            } else {
+                btn.textContent = '▶ 啟動自動循線（Space）';
+                btn.classList.remove('on');
+                box.textContent = '模式：手動';
+                box.style.color = '#aaa';
+            }
+        }
+
+        // ---- 設定參數 ----
+        function saveSetting(key, value) {
+            const payload = {};
+            payload[key] = value;
+            fetch('/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            }).catch(console.error);
+        }
+
+        // ---- 行駛 ----
+        const keyMap = { 'w':'forward','s':'backward','a':'left','d':'right' };
+        const pressedKeys = new Set();
+
+        function sendCmd(action) {
+            if (action !== 'stop' && autoOn) {
+                autoOn = false;
+                updateAutoUI();
+            }
+            fetch('/control', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'action=' + action
+            }).catch(console.error);
+        }
+
+        // ---- 鏡頭 ----
+        let camTimer = null, camBusy = false;
+
+        function sendCam(dir) {
+            if (camBusy) return;
+            camBusy = true;
+            fetch('/camera', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'direction=' + dir
+            })
+            .then(r => r.json())
+            .then(d => { document.getElementById('servo-box').textContent = 'PAN：' + d.pan + '° | TILT：' + d.tilt + '°'; })
+            .catch(console.error)
+            .finally(() => { camBusy = false; });
+        }
+
+        function startCam(dir) {
+            if (camTimer) return;
+            sendCam(dir);
+            camTimer = setInterval(() => sendCam(dir), 400);
+        }
+
+        function stopCam() {
+            clearInterval(camTimer); camTimer = null;
+            sendCam('cam_release');
+        }
+
+        // ---- 鍵盤 ----
+        document.addEventListener('keydown', e => {
+            const key = e.key.toLowerCase();
+            if (keyMap[key] && !pressedKeys.has(key)) {
+                pressedKeys.add(key); sendCmd(keyMap[key]);
+            }
+            const camKey = {'arrowup':'cam_up','arrowdown':'cam_down','arrowleft':'cam_left','arrowright':'cam_right'};
+            if (camKey[key] && !pressedKeys.has(key)) {
+                e.preventDefault(); pressedKeys.add(key); startCam(camKey[key]);
+            }
+            if (e.key === ' ') { e.preventDefault(); toggleAuto(); }
+        });
+
+        document.addEventListener('keyup', e => {
+            const key = e.key.toLowerCase();
+            if (keyMap[key]) { pressedKeys.delete(key); sendCmd('stop'); }
+            const camKey = {'arrowup':'cam_up','arrowdown':'cam_down','arrowleft':'cam_left','arrowright':'cam_right'};
+            if (camKey[key]) { pressedKeys.delete(key); stopCam(); }
+        });
+
+        // ---- 狀態輪詢 ----
+        let firstLoad = true;
+        setInterval(() => {
+            fetch('/status')
+            .then(r => r.json())
+            .then(d => {
+                document.getElementById('status-box').textContent = 'STATUS：' + d.status;
+                document.getElementById('speed-box').textContent  = 'SPEED：' + d.speed + '%';
+
+                const cpu = d.cpu ?? 0;
+                const mem = d.mem ?? 0;
+                document.getElementById('cpu-val').textContent = cpu.toFixed(0);
+                document.getElementById('mem-val').textContent = mem.toFixed(0);
+                const bar = document.getElementById('cpu-bar');
+                bar.style.width = cpu + '%';
+                bar.style.background = cpu > 80 ? '#ff5555' : cpu > 60 ? '#ffaa33' : '#ffd080';
+
+                if (d.auto !== autoOn) { autoOn = d.auto; updateAutoUI(); }
+
+                if (firstLoad && d.settings) {
+                    firstLoad = false;
+                    const s = d.settings;
+                    const sl = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+                    sl('sl-speed', s.speed);
+                    document.getElementById('v-speed').textContent = s.speed;
+                    sl('sl-fps', s.fps);
+                    document.getElementById('v-fps').textContent = s.fps;
+                    sl('sl-kp', Math.round(s.kp * 10));
+                    document.getElementById('v-kp').textContent = s.kp.toFixed(1);
+                    sl('sl-skip', s.correct_skip);
+                    document.getElementById('v-skip').textContent = s.correct_skip;
+                    document.getElementById('tog-debug').checked = s.show_debug;
+                    // 車道偵測參數
+                    if (s.white_s_min     != null) { sl('sl-smin',  s.white_s_min);     document.getElementById('v-smin').textContent  = s.white_s_min; }
+                    if (s.white_s_max     != null) { sl('sl-smax',  s.white_s_max);     document.getElementById('v-smax').textContent  = s.white_s_max; }
+                    if (s.white_v_min     != null) { sl('sl-vmin',  s.white_v_min);     document.getElementById('v-vmin').textContent  = s.white_v_min; }
+                    if (s.white_v_max     != null) { sl('sl-vmax',  s.white_v_max);     document.getElementById('v-vmax').textContent  = s.white_v_max; }
+                    if (s.hough_threshold != null) { sl('sl-hthr',  s.hough_threshold); document.getElementById('v-hthr').textContent  = s.hough_threshold; }
+                    if (s.hough_min_len   != null) { sl('sl-hmin',  s.hough_min_len);   document.getElementById('v-hmin').textContent  = s.hough_min_len; }
+                    if (s.hough_max_gap   != null) { sl('sl-hgap',  s.hough_max_gap);   document.getElementById('v-hgap').textContent  = s.hough_max_gap; }
+                    if (s.seg_min_len     != null) { sl('sl-seglen',s.seg_min_len);     document.getElementById('v-seglen').textContent= s.seg_min_len; }
+                    if (s.lane_half_width     != null) { sl('sl-lhw', s.lane_half_width);                    document.getElementById('v-lhw').textContent = s.lane_half_width; }
+                    if (s.single_target_ratio != null) { sl('sl-str', Math.round(s.single_target_ratio*100)); document.getElementById('v-str').textContent = s.single_target_ratio.toFixed(2); }
+                    if (s.horizontal_slope    != null) { sl('sl-hs',  Math.round(s.horizontal_slope*100));    document.getElementById('v-hs').textContent  = s.horizontal_slope.toFixed(2); }
+                    if (s.single_e_clamp      != null) { sl('sl-sec', s.single_e_clamp);                      document.getElementById('v-sec').textContent = s.single_e_clamp; }
+                    if (s.noise_ratio         != null) { sl('sl-nr',  Math.round(s.noise_ratio*10));           document.getElementById('v-nr').textContent  = s.noise_ratio.toFixed(1); }
+                    if (s.overlay_alpha       != null) { sl('sl-oa',  Math.round(s.overlay_alpha*100));        document.getElementById('v-oa').textContent  = s.overlay_alpha.toFixed(2); }
+                }
+            })
+            .catch(console.error);
+        }, 500);
+
+        window.oncontextmenu = e => { e.preventDefault(); return false; };
+
+        // ---- ROI 6 頂點拖曳編輯 ----
+        const roiCanvas = document.getElementById('roi-canvas');
+        const roiCtx = roiCanvas.getContext('2d');
+        const IMG_W = 480, IMG_H = 360;
+        const HANDLE_R = 8;
+
+        let roiPts = [
+            [0.0,  1.0],
+            [0.15, 0.55],
+            [0.3,  0.1],
+            [0.7,  0.1],
+            [0.85, 0.55],
+            [1.0,  1.0],
+        ];
+        let roiEditing = false;
+        let dragIdx = -1;
+
+        fetch('/roi').then(r => r.json()).then(d => {
+            if (d.roi && d.roi.length === 6) roiPts = d.roi.map(p => [p[0], p[1]]);
+            drawRoi(false);
+        });
+
+        function toCanvas(rx, ry) { return [rx * IMG_W, ry * IMG_H]; }
+        function toRatio(cx, cy)  { return [cx / IMG_W, cy / IMG_H]; }
+
+        function drawRoi(showHandles) {
+            roiCtx.clearRect(0, 0, IMG_W, IMG_H);
+            const pts = roiPts.map(p => toCanvas(p[0], p[1]));
+
+            roiCtx.beginPath();
+            roiCtx.moveTo(pts[0][0], pts[0][1]);
+            for (let i = 1; i < pts.length; i++) roiCtx.lineTo(pts[i][0], pts[i][1]);
+            roiCtx.closePath();
+            roiCtx.fillStyle = 'rgba(0,0,0,0)';
+            roiCtx.fill();
+
+            roiCtx.strokeStyle = showHandles ? '#ff9a3c' : '#5b9aff';
+            roiCtx.lineWidth = 1.5;
+            roiCtx.setLineDash([5, 3]);
+            roiCtx.stroke();
+            roiCtx.setLineDash([]);
+
+            if (showHandles) {
+                pts.forEach(([x, y], i) => {
+                    roiCtx.beginPath();
+                    roiCtx.arc(x, y, HANDLE_R, 0, Math.PI * 2);
+                    roiCtx.fillStyle = dragIdx === i ? '#fff' : '#ff9a3c';
+                    roiCtx.fill();
+                    roiCtx.strokeStyle = '#333';
+                    roiCtx.lineWidth = 1;
+                    roiCtx.stroke();
+                    roiCtx.fillStyle = '#111';
+                    roiCtx.font = 'bold 9px Arial';
+                    roiCtx.textAlign = 'center';
+                    roiCtx.textBaseline = 'middle';
+                    roiCtx.fillText(i + 1, x, y);
+                });
+            }
+        }
+
+        function toggleRoiEdit() {
+            roiEditing = !roiEditing;
+            const btn = document.getElementById('btn-roi-edit');
+            const resetBtn = document.getElementById('btn-roi-reset');
+            const hint = document.getElementById('roi-hint');
+            if (roiEditing) {
+                roiCanvas.classList.add('editing');
+                btn.classList.add('active');
+                btn.textContent = '✅ 完成編輯';
+                resetBtn.style.display = '';
+                hint.textContent = '拖曳頂點調整 ROI 範圍';
+            } else {
+                roiCanvas.classList.remove('editing');
+                btn.classList.remove('active');
+                btn.textContent = '✏️ 編輯 ROI';
+                resetBtn.style.display = 'none';
+                hint.textContent = '';
+                saveRoi();
+            }
+            drawRoi(roiEditing);
+        }
+
+        function resetRoi() {
+            roiPts = [
+                [0.0,  1.0],
+                [0.15, 0.55],
+                [0.3,  0.1],
+                [0.7,  0.1],
+                [0.85, 0.55],
+                [1.0,  1.0],
+            ];
+            drawRoi(true);
+        }
+
+        function saveRoi() {
+            fetch('/roi', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({roi: roiPts})
+            }).catch(console.error);
+        }
+
+        function getEventPos(e) {
+            const rect = roiCanvas.getBoundingClientRect();
+            const scaleX = IMG_W / rect.width;
+            const scaleY = IMG_H / rect.height;
+            const src = e.touches ? e.touches[0] : e;
+            return [(src.clientX - rect.left) * scaleX,
+                    (src.clientY - rect.top)  * scaleY];
+        }
+
+        function findHandle(cx, cy) {
+            for (let i = 0; i < roiPts.length; i++) {
+                const [px, py] = toCanvas(roiPts[i][0], roiPts[i][1]);
+                if (Math.hypot(cx - px, cy - py) <= HANDLE_R + 4) return i;
+            }
+            return -1;
+        }
+
+        roiCanvas.addEventListener('mousedown', e => {
+            if (!roiEditing) return;
+            const [cx, cy] = getEventPos(e);
+            dragIdx = findHandle(cx, cy);
+            drawRoi(true);
+        });
+
+        roiCanvas.addEventListener('mousemove', e => {
+            if (!roiEditing || dragIdx < 0) return;
+            let [cx, cy] = getEventPos(e);
+            cx = Math.max(0, Math.min(IMG_W, cx));
+            cy = Math.max(0, Math.min(IMG_H, cy));
+            roiPts[dragIdx] = toRatio(cx, cy);
+            drawRoi(true);
+        });
+
+        roiCanvas.addEventListener('mouseup', () => { dragIdx = -1; drawRoi(true); });
+        roiCanvas.addEventListener('mouseleave', () => { if (dragIdx >= 0) { dragIdx = -1; drawRoi(true); } });
+
+        roiCanvas.addEventListener('touchstart', e => {
+            if (!roiEditing) return;
+            e.preventDefault();
+            const [cx, cy] = getEventPos(e);
+            dragIdx = findHandle(cx, cy);
+            drawRoi(true);
+        }, {passive: false});
+
+        roiCanvas.addEventListener('touchmove', e => {
+            if (!roiEditing || dragIdx < 0) return;
+            e.preventDefault();
+            let [cx, cy] = getEventPos(e);
+            cx = Math.max(0, Math.min(IMG_W, cx));
+            cy = Math.max(0, Math.min(IMG_H, cy));
+            roiPts[dragIdx] = toRatio(cx, cy);
+            drawRoi(true);
+        }, {passive: false});
+
+        roiCanvas.addEventListener('touchend', e => {
+            e.preventDefault();
+            dragIdx = -1;
+            drawRoi(true);
+        }, {passive: false});
+
+        drawRoi(false);
+    </script>
+</body>
+</html>
