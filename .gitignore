@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.jsonl
+*.html
+static/
+lane_test.jpg
