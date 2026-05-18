@@ -4,3 +4,4 @@ __pycache__/
 *.html
 static/
 lane_test.jpg
+report/
